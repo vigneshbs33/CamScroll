@@ -109,6 +109,11 @@ class FaceTrackingService : LifecycleService() {
             return START_NOT_STICKY
         }
 
+        if (isRunning) {
+            Log.d(TAG, "Service already running — ignoring duplicate start")
+            return START_STICKY
+        }
+
         createNotificationChannel()
         ServiceCompat.startForeground(
             this,
@@ -129,8 +134,10 @@ class FaceTrackingService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        isRunning = false // FIX BUG-10/14
+        isRunning = false
         cameraController.stop()
+        faceAnalyzer.close()  // Release MediaPipe resources
+        handAnalyzer.close()
         overlayManager.hide()
         gestureEngine.reset()
         Log.d(TAG, "Service destroyed")

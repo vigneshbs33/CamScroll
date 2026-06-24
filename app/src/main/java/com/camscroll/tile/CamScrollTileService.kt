@@ -1,6 +1,8 @@
 package com.camscroll.tile
 
+import android.app.PendingIntent
 import android.content.Intent
+import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.camscroll.service.FaceTrackingService
@@ -29,10 +31,18 @@ class CamScrollTileService : TileService() {
             tile.updateTile()
         } else {
             // Start: must go through a visible Activity (Android 14 camera restriction)
-            startActivityAndCollapse(
-                Intent(this, LaunchActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
+            val launchIntent = Intent(this, LaunchActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // API 34+: startActivityAndCollapse(Intent) is deprecated, use PendingIntent
+                val pi = PendingIntent.getActivity(
+                    this, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE
+                )
+                startActivityAndCollapse(pi)
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityAndCollapse(launchIntent)
+            }
         }
     }
 

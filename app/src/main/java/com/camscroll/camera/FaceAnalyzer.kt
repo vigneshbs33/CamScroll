@@ -117,12 +117,9 @@ class FaceAnalyzer(
 
 /** Convert ImageProxy to Bitmap, mirrored for front camera. */
 private fun ImageProxy.toBitmap(): Bitmap {
-    val buffer = planes[0].buffer
-    val bytes = ByteArray(buffer.remaining())
-    buffer.get(bytes)
-    buffer.rewind()
+    val buffer = planes[0].buffer.also { it.rewind() }
     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    bmp.copyPixelsFromBuffer(planes[0].buffer)
+    bmp.copyPixelsFromBuffer(buffer)
     val matrix = Matrix().apply { postScale(-1f, 1f, width / 2f, height / 2f) }
     val mirrored = Bitmap.createBitmap(bmp, 0, 0, width, height, matrix, false)
     bmp.recycle()

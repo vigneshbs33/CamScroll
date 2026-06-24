@@ -1,10 +1,16 @@
 package com.camscroll.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.camscroll.R
 import com.camscroll.data.UserPreferences
@@ -74,10 +80,23 @@ class MainActivity : AppCompatActivity() {
         if (FaceTrackingService.isRunning) {
             stopService(Intent(this, FaceTrackingService::class.java))
         } else {
+            // Guard: check camera permission
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Camera permission required", Toast.LENGTH_SHORT).show()
+                return
+            }
+            // Guard: check overlay permission
+            if (!Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Draw over apps permission required", Toast.LENGTH_SHORT).show()
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")))
+                return
+            }
             startForegroundService(Intent(this, FaceTrackingService::class.java))
         }
         // Small delay to let service state update
-        btnToggle.postDelayed({ updateUI() }, 200)
+        btnToggle.postDelayed({ updateUI() }, 300)
     }
 
     private fun updateUI() {
