@@ -7,14 +7,14 @@ import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.tasks.components.containers.Category
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
-import com.google.mediapipe.tasks.components.containers.Category
-import kotlin.math.atan2
 import kotlin.math.PI
+import kotlin.math.atan2
 
 private const val TAG = "FaceAnalyzer"
 private const val MODEL_PATH = "face_landmarker.task"
@@ -22,6 +22,11 @@ private const val MODEL_PATH = "face_landmarker.task"
 /**
  * ImageAnalysis.Analyzer that feeds each camera frame to MediaPipe FaceLandmarker.
  * Extracts blendshapes and head yaw, then calls back into the GestureEngine.
+ *
+ * FIX BUG-01: Removed recursive extension that caused StackOverflowError.
+ * FIX BUG-02: Removed wrong PointF3D extension; use Matrix.data() correctly.
+ * FIX BUG-17: Bitmap is recycled after each frame to prevent memory leak.
+ * FIX SEC-04: GPU delegate falls back to CPU if GPU is unavailable.
  */
 class FaceAnalyzer(
     context: Context,
@@ -32,13 +37,72 @@ class FaceAnalyzer(
     private val faceLandmarker: FaceLandmarker
 
     init {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(MODEL_PATH)
-            .setDelegate(Delegate.GPU)
-            .build()
+        faceLandmarker = createLandmarker(context)
+        Log.d(TAG, "FaceLandmarker initialized")
+    }
 
-        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
+    override fun analyze(image: ImageProxy) {
+        val bitmap = image.toBitmap()
+        val mpImage = BitmapImageBuilder(bitmap).build()
+        faceLandmarker.detectAsync(mpImage, image.imageInfo.timestamp)
+        image.close()
+        bitmap.recycle() // FIX BUG-17: recycle every frame bitmap
+    }
+
+    private fun handleResult(result: FaceLandmarkerResult) {
+        val blendshapesOpt = result.faceBlendshapes()
+        if (blendshapesOpt.isEmpty || blendshapesOpt.get().isEmpty()) {
+            onNoFace()
+            return
+        }
+
+        val blendshapes: List<Category> = blendshapesOpt.get()[0]
+        val yaw = extractYaw(result)
+        onFaceResult(blendshapes, yaw)
+    }
+
+    /**
+     * Extracts yaw (left-right head rotation) from the 4×4 facial transformation matrix.
+     *
+     * FIX BUG-01 + BUG-02: Previously had a recursive extension and wrong PointF3D type.
+     * MediaPipe Matrix.data() returns float[][] (row-major 4x4).
+     * Yaw = atan2(-R[0][2], R[0][0]) in this coordinate system.
+     */
+    private fun extractYaw(result: FaceLandmarkerResult): Float {
+        val matricesOpt = result.facialTransformationMatrixes()
+        if (matricesOpt.isEmpty || matricesOpt.get().isEmpty()) return 0f
+
+        return try {
+            val data: Array<FloatArray> = matricesOpt.get()[0].data()
+            if (data.size < 3 || data[0].size < 3) return 0f
+            // Row 0, columns 0 and 2 give us cos(yaw) and -sin(yaw)
+            val yawRad = atan2(-data[0][2].toDouble(), data[0][0].toDouble())
+            (yawRad * 180.0 / PI).toFloat()
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not extract yaw: ${e.message}")
+            0f
+        }
+    }
+
+    fun close() {
+        faceLandmarker.close()
+    }
+
+    // FIX SEC-04: Try GPU first, fall back to CPU on unsupported hardware
+    private fun createLandmarker(context: Context): FaceLandmarker {
+        return try {
+            val gpuBase = BaseOptions.builder().setDelegate(Delegate.GPU).build()
+            FaceLandmarker.createFromOptions(context, buildOptions(gpuBase))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "GPU delegate unavailable, falling back to CPU: ${e.message}")
+            val cpuBase = BaseOptions.builder().setDelegate(Delegate.CPU).build()
+            FaceLandmarker.createFromOptions(context, buildOptions(cpuBase))
+        }
+    }
+
+    private fun buildOptions(base: BaseOptions) =
+        FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(base)
             .setOutputFaceBlendshapes(true)
             .setOutputFacialTransformationMatrixes(true)
             .setRunningMode(RunningMode.LIVE_STREAM)
@@ -49,64 +113,18 @@ class FaceAnalyzer(
             .setResultListener { result, _ -> handleResult(result) }
             .setErrorListener { e -> Log.e(TAG, "FaceLandmarker error", e) }
             .build()
-
-        faceLandmarker = FaceLandmarker.createFromOptions(context, options)
-        Log.d(TAG, "FaceLandmarker initialized")
-    }
-
-    override fun analyze(image: ImageProxy) {
-        val bitmap = image.toBitmap()
-        val mpImage = BitmapImageBuilder(bitmap).build()
-        faceLandmarker.detectAsync(mpImage, image.imageInfo.timestamp)
-        image.close()
-    }
-
-    private fun handleResult(result: FaceLandmarkerResult) {
-        if (result.faceBlendshapes().isEmpty || result.faceBlendshapes().get().isEmpty()) {
-            onNoFace()
-            return
-        }
-
-        val blendshapes: List<Category> = result.faceBlendshapes().get()[0]
-
-        // Extract yaw from facial transformation matrix
-        val yaw = extractYaw(result)
-
-        onFaceResult(blendshapes, yaw)
-    }
-
-    /**
-     * Extracts yaw (left-right head rotation) from the 4x4 facial transformation matrix.
-     * Matrix is column-major. Yaw = atan2(M[8], M[10]).
-     */
-    private fun extractYaw(result: FaceLandmarkerResult): Float {
-        if (result.facialTransformationMatrixes().isEmpty ||
-            result.facialTransformationMatrixes().get().isEmpty()) return 0f
-
-        val matrix = result.facialTransformationMatrixes().get()[0]
-        // matrix is a 4x4 float array in column-major order
-        val m = matrix.flattenToArray()
-        if (m.size < 11) return 0f
-        val yawRad = atan2(m[8].toDouble(), m[10].toDouble())
-        return (yawRad * 180.0 / PI).toFloat()
-    }
-
-    private fun android.media.Image.toBitmap(): Bitmap {
-        // handled via ImageProxy.toBitmap() extension below
-        throw UnsupportedOperationException()
-    }
 }
 
-// Extension to convert ImageProxy to Bitmap
+/** Convert ImageProxy to Bitmap, mirrored for front camera. */
 private fun ImageProxy.toBitmap(): Bitmap {
-    val bitmapBuffer = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    bitmapBuffer.copyPixelsFromBuffer(planes[0].buffer)
-    // Front camera — mirror horizontally
+    val buffer = planes[0].buffer
+    val bytes = ByteArray(buffer.remaining())
+    buffer.get(bytes)
+    buffer.rewind()
+    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    bmp.copyPixelsFromBuffer(planes[0].buffer)
     val matrix = Matrix().apply { postScale(-1f, 1f, width / 2f, height / 2f) }
-    return Bitmap.createBitmap(bitmapBuffer, 0, 0, width, height, matrix, false)
+    val mirrored = Bitmap.createBitmap(bmp, 0, 0, width, height, matrix, false)
+    bmp.recycle()
+    return mirrored
 }
-
-private fun android.graphics.PointF3D.flattenToArray(): FloatArray = floatArrayOf(x, y, z)
-
-private fun com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
-    .facialTransformationMatrixes() = this.facialTransformationMatrixes()

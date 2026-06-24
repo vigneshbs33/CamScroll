@@ -21,6 +21,7 @@ import com.camscroll.gesture.GestureConfig
 import com.camscroll.gesture.GestureEngine
 import com.camscroll.gesture.GestureEvent
 import com.camscroll.ui.MainActivity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -31,13 +32,9 @@ private const val CHANNEL_ID = "camscroll_active"
 /**
  * Core foreground service. Runs while CamScroll is active.
  *
- * Responsibilities:
- * - Open camera (CameraX, front, 320×240, 15fps)
- * - Run MediaPipe face + hand inference
- * - Feed results to GestureEngine
- * - Broadcast GestureEvents to CamScrollAccessibilityService
- * - Show/hide overlay dot
- * - Handle FastQuit → stop self
+ * FIX BUG-10/14: isRunning accurately reflects the service state.
+ * FIX BUG-23: Safely resolve intent type without simpleName reflection.
+ * FIX ARCH-02: Collect gesture events on Dispatchers.Main.
  */
 class FaceTrackingService : LifecycleService() {
 
@@ -59,7 +56,6 @@ class FaceTrackingService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        isRunning = true
         Log.d(TAG, "Service created")
 
         gestureEngine = GestureEngine()
@@ -97,8 +93,8 @@ class FaceTrackingService : LifecycleService() {
             }
         }
 
-        // Collect gesture events and broadcast to AccessibilityService
-        lifecycleScope.launch {
+        // Collect gesture events on MAIN thread
+        lifecycleScope.launch(Dispatchers.Main) {
             gestureEngine.events.collect { event ->
                 handleGestureEvent(event)
             }
@@ -113,7 +109,6 @@ class FaceTrackingService : LifecycleService() {
             return START_NOT_STICKY
         }
 
-        // Start foreground IMMEDIATELY (within 5 seconds — Android requirement)
         createNotificationChannel()
         ServiceCompat.startForeground(
             this,
@@ -124,6 +119,7 @@ class FaceTrackingService : LifecycleService() {
             else 0
         )
 
+        isRunning = true // FIX BUG-10/14
         cameraController.start()
         overlayManager.show()
 
@@ -133,7 +129,7 @@ class FaceTrackingService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
-        isRunning = false
+        isRunning = false // FIX BUG-10/14
         cameraController.stop()
         overlayManager.hide()
         gestureEngine.reset()
@@ -153,8 +149,19 @@ class FaceTrackingService : LifecycleService() {
     }
 
     private fun broadcastGesture(event: GestureEvent) {
+        val typeName = when (event) {
+            is GestureEvent.ScrollUp -> "ScrollUp"
+            is GestureEvent.ScrollDown -> "ScrollDown"
+            is GestureEvent.Tap -> "Tap"
+            is GestureEvent.Back -> "Back"
+            is GestureEvent.NextItem -> "NextItem"
+            is GestureEvent.PrevItem -> "PrevItem"
+            is GestureEvent.PausePlay -> "PausePlay"
+            else -> return
+        }
+
         val intent = Intent(BROADCAST_GESTURE).apply {
-            putExtra(EXTRA_GESTURE_TYPE, event::class.simpleName)
+            putExtra(EXTRA_GESTURE_TYPE, typeName)
             setPackage(packageName)
         }
         sendBroadcast(intent)

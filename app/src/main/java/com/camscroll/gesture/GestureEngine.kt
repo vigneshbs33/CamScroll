@@ -10,41 +10,39 @@ import kotlinx.coroutines.flow.asSharedFlow
  * Core gesture engine. Receives blendshape scores and head pose from MediaPipe,
  * runs them through BlendshapeFilters, and emits GestureEvents.
  *
- * Usage:
- *   engine.updateConfig(config)
- *   engine.processFaceResult(blendshapes, yaw)
- *   engine.processHandResult(handLandmarks)
- *   collect engine.events to receive GestureEvents
+ * FIX BUG-08: Evaluate filters once per frame to prevent double-firing and double-smoothing.
+ * FIX BUG-22: Use Math.abs() for Float range checking.
+ * FIX ARCH-01: Added @Volatile and @Synchronized for thread-safety.
  */
 class GestureEngine {
 
     private val _events = MutableSharedFlow<GestureEvent>(extraBufferCapacity = 16)
     val events: SharedFlow<GestureEvent> = _events.asSharedFlow()
 
-    private var config: GestureConfig = GestureConfig()
+    @Volatile private var config: GestureConfig = GestureConfig()
 
     // --- Blendshape filters (one per expression) ---
-    private var browRaiseFilter = buildFilter(config.browRaiseActivate, config.browRaiseDeactivate)
-    private var browLowerFilter = buildFilter(config.browLowerActivate, config.browLowerDeactivate)
-    private var blinkFilter = buildFilter(config.blinkActivate, config.blinkDeactivate)
-    private var smileFilter = buildFilter(config.smileActivate, config.smileDeactivate)
-    private var jawOpenFilter = buildFilter(config.jawOpenActivate, config.jawOpenDeactivate)
+    @Volatile private var browRaiseFilter = buildFilter(config.browRaiseActivate, config.browRaiseDeactivate)
+    @Volatile private var browLowerFilter = buildFilter(config.browLowerActivate, config.browLowerDeactivate)
+    @Volatile private var blinkFilter = buildFilter(config.blinkActivate, config.blinkDeactivate)
+    @Volatile private var smileFilter = buildFilter(config.smileActivate, config.smileDeactivate)
+    @Volatile private var jawOpenFilter = buildFilter(config.jawOpenActivate, config.jawOpenDeactivate)
 
     // --- Head tilt state ---
-    private var headTiltRight = false
-    private var headTiltLeft = false
-    private var lastHeadTiltFire = 0L
+    @Volatile private var headTiltRight = false
+    @Volatile private var headTiltLeft = false
+    @Volatile private var lastHeadTiltFire = 0L
 
     // --- Fast quit hold timer ---
-    private var fastQuitStartTime = 0L
-    private var fastQuitActive = false
+    @Volatile private var fastQuitStartTime = 0L
+    @Volatile private var fastQuitActive = false
 
     // --- No-face pause ---
-    private var lastFaceSeenTime = System.currentTimeMillis()
-    private var isPaused = false
+    @Volatile private var lastFaceSeenTime = System.currentTimeMillis()
+    @Volatile private var isPaused = false
     private val noFacePauseMs = 10_000L // pause after 10s without face
 
-    /** Update config — rebuilds filters with new thresholds. */
+    @Synchronized
     fun updateConfig(newConfig: GestureConfig) {
         config = newConfig
         browRaiseFilter = buildFilter(config.browRaiseActivate, config.browRaiseDeactivate, config.browBaselineScore)
@@ -56,11 +54,7 @@ class GestureEngine {
         headTiltLeft = false
     }
 
-    /**
-     * Called every frame with MediaPipe FaceLandmarker blendshape output.
-     * @param blendshapes List of Category objects (name + score)
-     * @param yawDeg Head yaw in degrees from facial transformation matrix
-     */
+    @Synchronized
     fun processFaceResult(blendshapes: List<Category>, yawDeg: Float) {
         lastFaceSeenTime = System.currentTimeMillis()
         if (isPaused) {
@@ -81,31 +75,38 @@ class GestureEngine {
         val blinkAvg = (blinkL + blinkR) / 2f
         val smileAvg = (smileL + smileR) / 2f
 
+        // FIX BUG-08: Evaluate filters exactly once per frame
+        val browRaiseFired = browRaiseFilter.process(brow)
+        val browLowerFired = browLowerFilter.process(browDownAvg)
+        val blinkFired = blinkFilter.process(blinkAvg)
+        val smileFired = smileFilter.process(smileAvg)
+        val jawOpenFired = jawOpenFilter.process(jaw)
+
         // Map user's chosen gesture to scroll events
-        if (browRaiseFilter.process(brow) && config.scrollUpGesture == ScrollGesture.EYEBROW_RAISE)
-            emit(GestureEvent.ScrollUp)
-        if (browRaiseFilter.process(brow) && config.scrollDownGesture == ScrollGesture.EYEBROW_RAISE)
-            emit(GestureEvent.ScrollDown)
+        if (browRaiseFired) {
+            if (config.scrollUpGesture == ScrollGesture.EYEBROW_RAISE) emit(GestureEvent.ScrollUp)
+            if (config.scrollDownGesture == ScrollGesture.EYEBROW_RAISE) emit(GestureEvent.ScrollDown)
+        }
 
-        if (browLowerFilter.process(browDownAvg) && config.scrollUpGesture == ScrollGesture.EYEBROW_LOWER)
-            emit(GestureEvent.ScrollUp)
-        if (browLowerFilter.process(browDownAvg) && config.scrollDownGesture == ScrollGesture.EYEBROW_LOWER)
-            emit(GestureEvent.ScrollDown)
+        if (browLowerFired) {
+            if (config.scrollUpGesture == ScrollGesture.EYEBROW_LOWER) emit(GestureEvent.ScrollUp)
+            if (config.scrollDownGesture == ScrollGesture.EYEBROW_LOWER) emit(GestureEvent.ScrollDown)
+        }
 
-        if (blinkFilter.process(blinkAvg) && config.scrollUpGesture == ScrollGesture.SLOW_BLINK)
-            emit(GestureEvent.ScrollUp)
-        if (blinkFilter.process(blinkAvg) && config.scrollDownGesture == ScrollGesture.SLOW_BLINK)
-            emit(GestureEvent.ScrollDown)
+        if (blinkFired) {
+            if (config.scrollUpGesture == ScrollGesture.SLOW_BLINK) emit(GestureEvent.ScrollUp)
+            if (config.scrollDownGesture == ScrollGesture.SLOW_BLINK) emit(GestureEvent.ScrollDown)
+        }
 
-        if (smileFilter.process(smileAvg) && config.scrollUpGesture == ScrollGesture.SMILE)
-            emit(GestureEvent.ScrollUp)
-        if (smileFilter.process(smileAvg) && config.scrollDownGesture == ScrollGesture.SMILE)
-            emit(GestureEvent.ScrollDown)
+        if (smileFired) {
+            if (config.scrollUpGesture == ScrollGesture.SMILE) emit(GestureEvent.ScrollUp)
+            if (config.scrollDownGesture == ScrollGesture.SMILE) emit(GestureEvent.ScrollDown)
+        }
 
-        if (jawOpenFilter.process(jaw) && config.scrollUpGesture == ScrollGesture.MOUTH_OPEN)
-            emit(GestureEvent.ScrollUp)
-        if (jawOpenFilter.process(jaw) && config.scrollDownGesture == ScrollGesture.MOUTH_OPEN)
-            emit(GestureEvent.ScrollDown)
+        if (jawOpenFired) {
+            if (config.scrollUpGesture == ScrollGesture.MOUTH_OPEN) emit(GestureEvent.ScrollUp)
+            if (config.scrollDownGesture == ScrollGesture.MOUTH_OPEN) emit(GestureEvent.ScrollDown)
+        }
 
         // Head tilt — with cooldown
         val now = System.currentTimeMillis()
@@ -129,17 +130,14 @@ class GestureEngine {
                 } else if (config.scrollDownGesture == ScrollGesture.HEAD_TILT_LEFT) {
                     emit(GestureEvent.ScrollDown); lastHeadTiltFire = now
                 }
-            } else if (adjustedYaw in -threshold..threshold) {
+            } else if (Math.abs(adjustedYaw) < threshold) { // FIX BUG-22
                 headTiltRight = false
                 headTiltLeft = false
             }
         }
     }
 
-    /**
-     * Called when no face is detected in frame.
-     * After 10 seconds, pauses gesture tracking.
-     */
+    @Synchronized
     fun onNoFaceDetected() {
         val now = System.currentTimeMillis()
         if (!isPaused && (now - lastFaceSeenTime) > noFacePauseMs) {
@@ -148,10 +146,7 @@ class GestureEngine {
         }
     }
 
-    /**
-     * Called every frame with MediaPipe Hand Landmarker output.
-     * Only used for Fast Quit gesture detection.
-     */
+    @Synchronized
     fun processHandResult(landmarks: List<NormalizedLandmark>) {
         if (config.fastQuitGesture == FastQuitGesture.DISABLED) return
 
@@ -176,12 +171,12 @@ class GestureEngine {
         }
     }
 
-    /** Called when no hand is detected. */
+    @Synchronized
     fun onNoHandDetected() {
         fastQuitActive = false
     }
 
-    /** Reset all filter state. */
+    @Synchronized
     fun reset() {
         browRaiseFilter.reset()
         browLowerFilter.reset()
@@ -195,7 +190,6 @@ class GestureEngine {
         lastFaceSeenTime = System.currentTimeMillis()
     }
 
-    /** Expose smoothed scores for calibration UI live feedback. */
     fun getBrowSmoothed() = browRaiseFilter.smoothedValue
     fun getBlinkSmoothed() = blinkFilter.smoothedValue
     fun getSmileSmoothed() = smileFilter.smoothedValue
@@ -207,7 +201,7 @@ class GestureEngine {
     }
 
     private fun buildFilter(activate: Float, deactivate: Float, baseline: Float = 0f): BlendshapeFilter {
-        val f = BlendshapeFilter(
+        return BlendshapeFilter(
             activateThreshold = activate / config.sensitivity,
             deactivateThreshold = deactivate / config.sensitivity,
             emaAlpha = config.emaAlpha,
@@ -215,7 +209,6 @@ class GestureEngine {
             cooldownMs = config.cooldownMs,
             baseline = baseline
         )
-        return f
     }
 
     private fun List<Category>.scoreFor(name: String): Float =

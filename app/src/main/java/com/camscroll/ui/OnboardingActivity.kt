@@ -21,6 +21,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.camscroll.R
 import com.camscroll.data.UserPreferences
 import com.camscroll.gesture.ScrollGesture
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class OnboardingActivity : AppCompatActivity() {
@@ -35,26 +36,25 @@ class OnboardingActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Skip onboarding if already done
+        // FIX BUG-06: Use .first() and set content only if not skipping
         lifecycleScope.launch {
-            UserPreferences.onboardingDone(this@OnboardingActivity).collect { done ->
-                if (done) {
-                    goToMain()
-                    return@collect
-                }
+            val done = UserPreferences.onboardingDone(this@OnboardingActivity).first()
+            if (done) {
+                goToMain()
+                return@launch
             }
+
+            setContentView(R.layout.activity_onboarding)
+            viewPager = findViewById(R.id.view_pager)
+            btnNext = findViewById(R.id.btn_next)
+            btnSkip = findViewById(R.id.btn_skip)
+
+            viewPager.isUserInputEnabled = false
+            viewPager.adapter = OnboardingPagerAdapter()
+
+            btnNext.setOnClickListener { advance() }
+            btnSkip.setOnClickListener { finishOnboarding() }
         }
-
-        setContentView(R.layout.activity_onboarding)
-        viewPager = findViewById(R.id.view_pager)
-        btnNext = findViewById(R.id.btn_next)
-        btnSkip = findViewById(R.id.btn_skip)
-
-        viewPager.isUserInputEnabled = false
-        viewPager.adapter = OnboardingPagerAdapter()
-
-        btnNext.setOnClickListener { advance() }
-        btnSkip.setOnClickListener { finishOnboarding() }
     }
 
     private fun advance() {
@@ -84,7 +84,10 @@ class OnboardingActivity : AppCompatActivity() {
     }
 
     private fun updatePermissionScreen() {
-        // Refresh page 2 (permissions) — handled by the adapter
+        // FIX BUG-20: Refresh page 2
+        if (::viewPager.isInitialized) {
+            viewPager.adapter?.notifyItemChanged(1)
+        }
     }
 
     inner class OnboardingPagerAdapter : androidx.recyclerview.widget.RecyclerView.Adapter<OnboardingPagerAdapter.PageHolder>() {

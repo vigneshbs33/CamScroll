@@ -38,15 +38,21 @@ object UserPreferences {
     fun gestureConfig(ctx: Context): Flow<GestureConfig> =
         ctx.dataStore.data.map { prefs ->
             GestureConfig(
-                scrollUpGesture = ScrollGesture.valueOf(
-                    prefs[KEY_SCROLL_UP_GESTURE] ?: ScrollGesture.EYEBROW_RAISE.name
-                ),
-                scrollDownGesture = ScrollGesture.valueOf(
-                    prefs[KEY_SCROLL_DOWN_GESTURE] ?: ScrollGesture.EYEBROW_LOWER.name
-                ),
-                fastQuitGesture = FastQuitGesture.valueOf(
-                    prefs[KEY_FAST_QUIT_GESTURE] ?: FastQuitGesture.CLOSE_FIST.name
-                ),
+                scrollUpGesture = try {
+                    ScrollGesture.valueOf(prefs[KEY_SCROLL_UP_GESTURE] ?: ScrollGesture.EYEBROW_RAISE.name)
+                } catch (e: IllegalArgumentException) {
+                    ScrollGesture.EYEBROW_RAISE
+                },
+                scrollDownGesture = try {
+                    ScrollGesture.valueOf(prefs[KEY_SCROLL_DOWN_GESTURE] ?: ScrollGesture.EYEBROW_LOWER.name)
+                } catch (e: IllegalArgumentException) {
+                    ScrollGesture.EYEBROW_LOWER
+                },
+                fastQuitGesture = try {
+                    FastQuitGesture.valueOf(prefs[KEY_FAST_QUIT_GESTURE] ?: FastQuitGesture.CLOSE_FIST.name)
+                } catch (e: IllegalArgumentException) {
+                    FastQuitGesture.CLOSE_FIST
+                },
                 sensitivity = prefs[KEY_SENSITIVITY] ?: 1.0f,
                 cooldownMs = prefs[KEY_COOLDOWN_MS] ?: 800L
             )

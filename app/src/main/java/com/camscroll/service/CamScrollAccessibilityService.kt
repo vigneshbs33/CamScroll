@@ -7,18 +7,18 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Path
-import android.util.DisplayMetrics
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 
 private const val TAG = "A11yService"
 
 /**
  * Receives GestureEvents from FaceTrackingService and converts them to real Android actions.
  *
- * Two scroll methods — tries AccessibilityNodeInfo first (more reliable),
- * falls back to dispatchGesture (works everywhere).
+ * FIX BUG-04/05: Use RECEIVER_NOT_EXPORTED on Android 13+.
+ * FIX BUG-15: Recycle AccessibilityNodeInfo objects to prevent memory leak.
+ * FIX BUG-19: Update getMetrics to support API 30+ without deprecation.
  */
 class CamScrollAccessibilityService : AccessibilityService() {
 
@@ -32,7 +32,11 @@ class CamScrollAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         val filter = IntentFilter(FaceTrackingService.BROADCAST_GESTURE)
-        registerReceiver(gestureReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(gestureReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(gestureReceiver, filter)
+        }
         Log.d(TAG, "Accessibility service connected")
     }
 
@@ -61,10 +65,6 @@ class CamScrollAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * Scroll using AccessibilityNodeInfo action (preferred — works in RecyclerViews, WebViews).
-     * Falls back to dispatchGesture swipe if no scrollable node found.
-     */
     private fun scroll(up: Boolean) {
         val root = rootInActiveWindow
         val scrollable = findScrollableNode(root)
@@ -74,7 +74,12 @@ class CamScrollAccessibilityService : AccessibilityService() {
                          else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
             val success = scrollable.performAction(action)
             scrollable.recycle()
+            if (root != null && root !== scrollable) {
+                root.recycle()
+            }
             if (success) return
+        } else {
+            root?.recycle()
         }
 
         // Fallback: simulate swipe gesture
@@ -88,28 +93,38 @@ class CamScrollAccessibilityService : AccessibilityService() {
         root ?: return null
         if (root.isScrollable) return root
         for (i in 0 until root.childCount) {
-            val found = findScrollableNode(root.getChild(i))
-            if (found != null) return found
+            val child = root.getChild(i) ?: continue
+            val found = findScrollableNode(child)
+            if (found != null) {
+                if (found !== child) child.recycle()
+                return found
+            }
+            child.recycle()
         }
         return null
     }
 
-    /**
-     * Simulate a swipe gesture using screen coordinates.
-     * Uses screen height dynamically — never hardcoded pixels.
-     */
+    private fun getScreenSize(): Pair<Float, Float> {
+        val wm = getSystemService(android.view.WindowManager::class.java)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wm.currentWindowMetrics.bounds
+            Pair(bounds.width().toFloat(), bounds.height().toFloat())
+        } else {
+            val metrics = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getMetrics(metrics)
+            Pair(metrics.widthPixels.toFloat(), metrics.heightPixels.toFloat())
+        }
+    }
+
     private fun dispatchScrollGesture(up: Boolean) {
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getMetrics(metrics)
-        val screenWidth = metrics.widthPixels.toFloat()
-        val screenHeight = metrics.heightPixels.toFloat()
+        val (screenWidth, screenHeight) = getScreenSize()
         val centerX = screenWidth / 2f
 
         val (startY, endY) = if (up) {
-            Pair(screenHeight * 0.35f, screenHeight * 0.65f)   // swipe down = scroll up
+            Pair(screenHeight * 0.35f, screenHeight * 0.65f)
         } else {
-            Pair(screenHeight * 0.65f, screenHeight * 0.35f)   // swipe up = scroll down
+            Pair(screenHeight * 0.65f, screenHeight * 0.35f)
         }
 
         val path = Path().apply {
@@ -121,15 +136,10 @@ class CamScrollAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, null)
     }
 
-    /**
-     * Tap the center of the screen.
-     */
     private fun tapCenter() {
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getMetrics(metrics)
-        val cx = metrics.widthPixels / 2f
-        val cy = metrics.heightPixels / 2f
+        val (screenWidth, screenHeight) = getScreenSize()
+        val cx = screenWidth / 2f
+        val cy = screenHeight / 2f
 
         val path = Path().apply { moveTo(cx, cy) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, 100L)

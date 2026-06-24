@@ -19,7 +19,9 @@ private const val MODEL_PATH = "hand_landmarker.task"
 
 /**
  * ImageAnalysis.Analyzer that detects hand landmarks for Fast Quit gesture.
- * Only active when Fast Quit is enabled in settings.
+ *
+ * FIX BUG-17: Bitmap recycled after each frame.
+ * FIX SEC-04: GPU → CPU fallback on unsupported hardware.
  */
 class HandAnalyzer(
     context: Context,
@@ -30,23 +32,7 @@ class HandAnalyzer(
     private val handLandmarker: HandLandmarker
 
     init {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(MODEL_PATH)
-            .setDelegate(Delegate.GPU)
-            .build()
-
-        val options = HandLandmarker.HandLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.LIVE_STREAM)
-            .setNumHands(1)
-            .setMinHandDetectionConfidence(0.5f)
-            .setMinHandPresenceConfidence(0.5f)
-            .setMinTrackingConfidence(0.5f)
-            .setResultListener { result, _ -> handleResult(result) }
-            .setErrorListener { e -> Log.e(TAG, "HandLandmarker error", e) }
-            .build()
-
-        handLandmarker = HandLandmarker.createFromOptions(context, options)
+        handLandmarker = createLandmarker(context)
         Log.d(TAG, "HandLandmarker initialized")
     }
 
@@ -55,6 +41,7 @@ class HandAnalyzer(
         val mpImage = BitmapImageBuilder(bitmap).build()
         handLandmarker.detectAsync(mpImage, image.imageInfo.timestamp)
         image.close()
+        bitmap.recycle() // FIX BUG-17
     }
 
     private fun handleResult(result: HandLandmarkerResult) {
@@ -62,19 +49,44 @@ class HandAnalyzer(
             onNoHand()
             return
         }
-        val landmarks: List<NormalizedLandmark> = result.landmarks()[0]
-        onHandResult(landmarks)
+        onHandResult(result.landmarks()[0])
     }
 
     fun close() {
         handLandmarker.close()
     }
+
+    // FIX SEC-04: GPU → CPU fallback
+    private fun createLandmarker(context: Context): HandLandmarker {
+        return try {
+            val gpuBase = BaseOptions.builder().setDelegate(Delegate.GPU).build()
+            HandLandmarker.createFromOptions(context, buildOptions(gpuBase))
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "GPU delegate unavailable, falling back to CPU: ${e.message}")
+            val cpuBase = BaseOptions.builder().setDelegate(Delegate.CPU).build()
+            HandLandmarker.createFromOptions(context, buildOptions(cpuBase))
+        }
+    }
+
+    private fun buildOptions(base: BaseOptions) =
+        HandLandmarker.HandLandmarkerOptions.builder()
+            .setBaseOptions(base)
+            .setRunningMode(RunningMode.LIVE_STREAM)
+            .setNumHands(1)
+            .setMinHandDetectionConfidence(0.5f)
+            .setMinHandPresenceConfidence(0.5f)
+            .setMinTrackingConfidence(0.5f)
+            .setResultListener { result, _ -> handleResult(result) }
+            .setErrorListener { e -> Log.e(TAG, "HandLandmarker error", e) }
+            .build()
 }
 
-// Extension to convert ImageProxy to Bitmap (mirrored for front camera)
+/** Convert ImageProxy to Bitmap, mirrored for front camera. */
 private fun ImageProxy.toBitmap(): Bitmap {
-    val bitmapBuffer = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    bitmapBuffer.copyPixelsFromBuffer(planes[0].buffer)
+    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    bmp.copyPixelsFromBuffer(planes[0].buffer)
     val matrix = Matrix().apply { postScale(-1f, 1f, width / 2f, height / 2f) }
-    return Bitmap.createBitmap(bitmapBuffer, 0, 0, width, height, matrix, false)
+    val mirrored = Bitmap.createBitmap(bmp, 0, 0, width, height, matrix, false)
+    bmp.recycle()
+    return mirrored
 }

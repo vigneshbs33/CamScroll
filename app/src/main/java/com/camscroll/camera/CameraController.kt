@@ -2,7 +2,10 @@ package com.camscroll.camera
 
 import android.content.Context
 import android.util.Log
+import android.util.Size
 import androidx.camera.core.*
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
@@ -14,8 +17,9 @@ private const val TAG = "CameraController"
 /**
  * Manages the CameraX lifecycle for CamScroll.
  *
- * Opens the front camera at 320×240, 15fps.
- * Binds an ImageAnalysis use case that feeds frames to FaceAnalyzer and HandAnalyzer.
+ * FIX BUG-03: Recreate executors on start instead of permanent shutdown.
+ * FIX BUG-09: Use separate executors for Face and Hand to prevent frame starvation.
+ * FIX BUG-18: Use ResolutionSelector instead of deprecated setTargetResolution.
  */
 class CameraController(
     private val context: Context,
@@ -24,9 +28,13 @@ class CameraController(
     private val handAnalyzer: HandAnalyzer
 ) {
     private var cameraProvider: ProcessCameraProvider? = null
-    private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var faceExecutor: ExecutorService? = null
+    private var handExecutor: ExecutorService? = null
 
     fun start() {
+        if (faceExecutor?.isShutdown != false) faceExecutor = Executors.newSingleThreadExecutor()
+        if (handExecutor?.isShutdown != false) handExecutor = Executors.newSingleThreadExecutor()
+
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             try {
@@ -40,27 +48,38 @@ class CameraController(
 
     private fun bindCamera() {
         val provider = cameraProvider ?: return
+        val fExec = faceExecutor ?: return
+        val hExec = handExecutor ?: return
 
         // Front camera only
         val selector = CameraSelector.Builder()
             .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
             .build()
 
-        // Face analysis — 320×240 is enough for landmark detection
-        val faceAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(320, 240))
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+        val resolutionSelector = ResolutionSelector.Builder()
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(320, 240),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                )
+            )
             .build()
-            .also { it.setAnalyzer(analysisExecutor, faceAnalyzer) }
 
-        // Hand analysis — same stream, separate analyzer
-        val handAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(320, 240))
+        // Face analysis
+        val faceAnalysis = ImageAnalysis.Builder()
+            .setResolutionSelector(resolutionSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
             .build()
-            .also { it.setAnalyzer(analysisExecutor, handAnalyzer) }
+            .also { it.setAnalyzer(fExec, faceAnalyzer) }
+
+        // Hand analysis
+        val handAnalysis = ImageAnalysis.Builder()
+            .setResolutionSelector(resolutionSelector)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build()
+            .also { it.setAnalyzer(hExec, handAnalyzer) }
 
         try {
             provider.unbindAll()
@@ -73,7 +92,8 @@ class CameraController(
 
     fun stop() {
         cameraProvider?.unbindAll()
-        analysisExecutor.shutdown()
+        faceExecutor?.shutdown()
+        handExecutor?.shutdown()
         Log.d(TAG, "Camera stopped")
     }
 }

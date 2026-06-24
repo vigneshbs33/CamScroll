@@ -75,6 +75,9 @@ dependencies {
     implementation(libs.navigation.fragment.ktx)
     implementation(libs.navigation.ui.ktx)
 
+    // ViewPager2
+    implementation(libs.viewpager2)
+
     // Gson (for CalibrationProfile serialization)
     implementation(libs.gson)
 

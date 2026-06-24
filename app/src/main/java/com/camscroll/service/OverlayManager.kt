@@ -9,13 +9,15 @@ import com.camscroll.R
 import com.camscroll.data.UserPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
  * Manages the floating status dot that appears on top of all apps.
  *
- * Design: a small circle (12dp) — green = active, amber = paused.
- * Tap to toggle pause/resume. Long-press to drag.
+ * FIX BUG-11: Load position before adding view to windowManager.
+ * FIX BUG-16: Properly cancel CoroutineScope on hide to prevent leak.
  */
 class OverlayManager(private val context: Context) {
 
@@ -26,50 +28,51 @@ class OverlayManager(private val context: Context) {
     private var params: WindowManager.LayoutParams? = null
     private var isShowing = false
     private var currentStatus = Status.ACTIVE
-    private val scope = CoroutineScope(Dispatchers.Main)
-
-    private var savedX = 16
-    private var savedY = 100
+    private var scope = CoroutineScope(Dispatchers.Main)
 
     fun show() {
         if (isShowing) return
-
-        // Load saved position
+        isShowing = true
+        
+        scope = CoroutineScope(Dispatchers.Main)
         scope.launch {
-            UserPreferences.overlayPosition(context).collect { (x, y) ->
-                savedX = x; savedY = y
+            // FIX BUG-11: Load position BEFORE configuring layout params
+            val (savedX, savedY) = UserPreferences.overlayPosition(context).first()
+
+            val layout = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = savedX
+                y = savedY
+            }
+            params = layout
+
+            val dot = buildDotView()
+            overlayView = dot
+            
+            if (isShowing) { // Check if hide was called while waiting
+                windowManager.addView(dot, layout)
+                setStatus(currentStatus)
+                setupDrag(dot, layout)
             }
         }
-
-        val layout = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = savedX
-            y = savedY
-        }
-        params = layout
-
-        val dot = buildDotView()
-        overlayView = dot
-        windowManager.addView(dot, layout)
-        isShowing = true
-        setStatus(Status.ACTIVE)
-        setupDrag(dot, layout)
     }
 
     fun hide() {
+        isShowing = false
+        scope.cancel() // FIX BUG-16: prevent coroutine leak
+        
         val view = overlayView ?: return
-        if (isShowing && view.isAttachedToWindow) {
+        if (view.isAttachedToWindow) {
             windowManager.removeView(view)
         }
         overlayView = null
-        isShowing = false
     }
 
     fun setStatus(status: Status) {
