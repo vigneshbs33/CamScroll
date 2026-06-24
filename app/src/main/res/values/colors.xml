@@ -1,0 +1,16 @@
+<resources>
+    <color name="bg_primary">#0F0F0F</color>
+    <color name="bg_surface">#1A1A1A</color>
+    <color name="bg_card">#222222</color>
+    <color name="accent">#FFFFFF</color>
+    <color name="accent_active">#4ADE80</color>
+    <color name="accent_paused">#FBBF24</color>
+    <color name="accent_inactive">#6B7280</color>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#9CA3AF</color>
+    <color name="text_hint">#4B5563</color>
+    <color name="divider">#2D2D2D</color>
+    <color name="overlay_dot_active">#4ADE80</color>
+    <color name="overlay_dot_paused">#FBBF24</color>
+    <color name="overlay_bg">#CC000000</color>
+</resources>
